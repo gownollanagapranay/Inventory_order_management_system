@@ -1,0 +1,146 @@
+
+services:
+
+  auth_service:
+    build:
+      context: .
+      dockerfile: services/auth_service/Dockerfile
+    container_name: auth_service
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: sqlite:////app/data/auth.db
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+    volumes:
+      - ./services/auth_service/auth.db:/app/data/auth.db
+    restart: unless-stopped
+
+  product_service:
+    build:
+      context: .
+      dockerfile: services/product_service/Dockerfile
+    container_name: product_service
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: sqlite:////app/data/product.db
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+    volumes:
+      - ./services/product_service/product.db:/app/data/product.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order_service:
+    build:
+      context: .
+      dockerfile: services/order_service/Dockerfile
+    container_name: order_service
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: sqlite:////app/data/order.db
+      PRODUCT_SERVICE_URL: http://product_service:8002
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_URL: amqp://app_user:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      RABBITMQ_USER: app_user
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+    volumes:
+      - ./services/order_service/order.db:/app/data/order.db
+    depends_on:
+      product_service:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notification_service:
+    build:
+      context: .
+      dockerfile: services/notification_service/Dockerfile
+    container_name: notification_service
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: app_user
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notification_worker:
+    build:
+      context: .
+      dockerfile: services/notification_service/Dockerfile
+    container_name: notification_worker
+    command: celery -A services.notification_service.celery_app:celery_app worker --loglevel=info
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: app_user
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: inventory_frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_STRIPE_PUBLISHABLE_KEY: ${VITE_STRIPE_PUBLISHABLE_KEY:-}
+    depends_on:
+      - auth_service
+      - product_service
+      - order_service
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
+  redis_data:
